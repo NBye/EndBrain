@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-构建一个基于 Python 的单机知识图谱系统，并最终封装为一个可安装的 `pip package`  名称为：endbrain（端脑）。使用者在实例化时传入持久化目录、内存上限，即可获得图谱的存储、加载、查询与内存治理能力。
+构建一个基于 Python 的单机知识图谱系统，并最终封装为一个可安装的 `pip package`。使用者在实例化时传入持久化目录、内存上限，即可获得图谱的存储、加载、查询与内存治理能力。
 
 本系统满足以下要求：
 
@@ -13,7 +13,8 @@
 - 可配置内存上限，但数据淘汰不只在超限时触发，而是持续综合评估数据价值
 - 数据价值评估综合考虑访问时间、访问频次、权重、重要程度等因素
 - 被判定淘汰的数据，需要同时从内存和本地持久化中移除
-- 通过 Python 函数 API 按关键词查询实体、关系并返回 `0~1` 权重值
+- 查询接口使用 `keywords: list[str]` 输入，不在当前版本中做分词
+- 实体和关系的查询先采用最简单的关键词相似匹配
 - 实体与关系都支持自定义结构的 `metadata` 数据包
 
 ## 2. 产品形态
@@ -56,6 +57,7 @@ eb = EndBrain(
 - 自定义友好：实体和关系允许挂载任意结构的 `metadata`
 - 主动治理：系统持续评估数据价值，而不是只在超限后被动淘汰
 - 可控淘汰：基于多因子综合评分决定是否淘汰
+- 简单查询：当前版本不做分词，查询依赖调用方传入的关键词列表
 
 ## 4. 需求解释与关键取舍
 
@@ -93,7 +95,7 @@ eb = EndBrain(
 作为 `pip package`，建议工程内部按如下方式组织：
 
 ```text
-project/
+./
   docs/
     structruing.md
   src/
@@ -254,10 +256,13 @@ storage_dir/
 
 职责：
 
-- 标准化关键词
+- 接收调用方传入的 `keywords: list[str]`
+- 对关键词做最基础的标准化，例如去空白、统一大小写
 - 从索引中找出候选实体和关系
-- 计算匹配权重
+- 计算最简单的匹配权重
 - 返回统一格式结果
+
+当前版本不做分词，不负责把自然语言拆成词。关键词列表由调用方自行准备。
 
 ## 7.5 Sync Manager 同步管理层
 
@@ -429,17 +434,46 @@ retain_score =
 
 ## 10.1 查询目标
 
-系统提供通过关键词查询实体和关系的函数接口，并返回权重值 `0~1`。
+系统提供通过关键词列表查询实体和关系的函数接口，并返回权重值 `0~1`。
+
+当前版本不做分词。调用方需要自行提供 `keywords: list[str]`。
 
 ## 10.2 查询 API 建议
 
 ```python
-query_entities(keyword: str, top_k: int = 10) -> list[dict]
-query_relations(keyword: str, top_k: int = 10) -> list[dict]
-query_graph(keyword: str, top_k: int = 10) -> dict
+query_entities(keywords: list[str], top_k: int = 10) -> list[dict]
+query_relations(keywords: list[str], top_k: int = 10) -> list[dict]
+query_graph(keywords: list[str], top_k: int = 10, depth: int = 1) -> dict
 ```
 
-## 10.3 权重组成
+参数语义：
+
+- `keywords`：调用方提供的关键词列表，不做分词
+- `top_k`：返回相似度最高的前 `k` 个结果
+- `depth`：仅对 `query_graph()` 生效，表示图递归扩展深度，默认 `1`
+
+建议限制：
+
+- 第一版 `depth` 默认值为 `1`
+- 第一版 `depth` 最大值限制为 `3`
+
+## 10.3 匹配方式
+
+当前版本采用最简单的关键词相似匹配，不做复杂语义检索。
+
+实体匹配建议：
+
+- `keywords` 与实体 `name` 的完全匹配
+- `keywords` 与实体 `name` 的包含匹配
+- `keywords` 与实体 `keywords` 的命中数量占比
+
+关系匹配建议：
+
+- `keywords` 与关系 `relation_type` 的完全匹配
+- `keywords` 与关系 `relation_type` 的包含匹配
+- `keywords` 与关系 `keywords` 的命中数量占比
+
+## 10.4 权重组成
 
 建议最终权重由三部分组成：
 
@@ -459,23 +493,32 @@ final_weight = normalize(
 
 输出范围固定控制在 `0~1`。
 
-## 10.4 实体评分维度
+## 10.5 实体评分维度
 
 - 名称精确匹配
-- 关键词精确匹配
-- 前缀匹配
-- 别名匹配
+- 名称包含匹配
+- 实体关键词命中比例
 - `weight`
 - `importance`
 
-## 10.5 关系评分维度
+## 10.6 关系评分维度
 
-- `relation_type` 命中
-- 关系关键词命中
-- 起点实体关键词相关性
-- 终点实体关键词相关性
+- `relation_type` 精确匹配
+- `relation_type` 包含匹配
+- 关系关键词命中比例
 - `weight`
 - `importance`
+
+## 10.7 图查询深度说明
+
+`query_graph()` 在命中初始实体或关系后，按 `depth` 做图扩展：
+
+- `depth=0`：只返回当前命中的对象
+- `depth=1`：返回命中对象及一跳关联
+- `depth=2`：继续向外扩展两跳
+- `depth=3`：作为第一版建议最大递归深度
+
+这样可以避免图查询无限扩张导致性能失控。
 
 ## 11. 包级 API 设计建议
 
@@ -506,9 +549,9 @@ delete_relation(...)
 ## 11.3 查询 API
 
 ```python
-query_entities(...)
-query_relations(...)
-query_graph(...)
+query_entities(keywords: list[str], top_k: int = 10)
+query_relations(keywords: list[str], top_k: int = 10)
+query_graph(keywords: list[str], top_k: int = 10, depth: int = 1)
 get_entity(...)
 get_relation(...)
 ```
@@ -574,8 +617,8 @@ get_stats()
 
 ## 12.3 查询流程
 
-1. 接收关键词
-2. 标准化关键词
+1. 接收 `keywords: list[str]`
+2. 对关键词做基础标准化
 3. 命中倒排索引
 4. 计算候选对象权重
 5. 更新访问时间与访问次数
@@ -626,9 +669,9 @@ get_stats()
 1. 是否接受“被淘汰数据最终从持久化中彻底删除”
 2. 是否接受持久化格式为 `JSONL + Snapshot + WAL`
 3. `metadata` 是否只要求支持 JSON 可序列化结构
-4. 第一版是否需要中文分词能力
-5. 查询结果中是否需要原样返回 `metadata`
-6. `sync_interval_seconds` 默认值是否接受为 `5`
+4. 查询结果中是否需要原样返回 `metadata`
+5. `sync_interval_seconds` 默认值是否接受为 `5`
+6. 第一版 `query_graph()` 的最大 `depth` 是否接受限制为 `3`
 
 ## 15. 推荐结论
 
@@ -640,7 +683,9 @@ get_stats()
 - 存储：本地文件 `JSONL + Snapshot + WAL`
 - 生命周期治理：按访问时间、访问频次、权重、重要程度、连接度综合评分
 - 淘汰语义：淘汰后同时从内存与持久化中移除
-- 查询：纯 Python 函数 API
+- 查询输入：`keywords: list[str]`，当前版本不做分词
+- 查询方式：实体和关系都采用最简单的关键词相似匹配
+- 图查询：支持 `depth` 参数控制递归扩展深度
 - 数据扩展：实体和关系都支持自定义 `metadata` 数据包
 
 如果你确认这份方案，我下一步就可以继续为你细化为：
